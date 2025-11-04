@@ -573,5 +573,446 @@ add_action('plugins_loaded', function() {
 // Activation hook
 register_activation_hook(__FILE__, ['CoachPro_LMS', 'activate']);
 }
+/** Part 2 — Shortcodes (programs, chat, dashboard, progress, coaches) */
+if (!defined('ABSPATH')) exit;
+
+if (!function_exists('cpl_render_container')) {
+    function cpl_render_container(string $id, array $attrs = [], string $fallback = ''): string {
+        $attrs_str = '';
+        foreach ($attrs as $k => $v) {
+            $attrs_str .= ' data-' . esc_attr($k) . '="' . esc_attr($v) . '"';
+        }
+        $html  = '<div id="' . esc_attr($id) . '" class="ssm ssm-root"'.$attrs_str.'>';
+        $html .= '<noscript><div class="ssm-noscript">'. esc_html__('This feature requires JavaScript.', CoachPro_LMS::TD) .'</div></noscript>';
+        if ($fallback) $html .= '<div class="ssm-fallback">'. wp_kses_post($fallback) .'</div>';
+        $html .= '</div>';
+        return $html;
+    }
+}
+
+CoachPro_LMS::instance(); // ensure class loaded
+
+// [coachpro_programs category="leadership" limit="6" columns="3"]
+CoachPro_LMS::instance()->sc_programs = function($atts){
+    $a = shortcode_atts([
+        'category' => '',
+        'limit'    => 6,
+        'columns'  => 3,
+    ], $atts, 'coachpro_programs');
+
+    $fallback = '<p>'.__('Programs list will appear here. Use filters above if available.', CoachPro_LMS::TD).'</p>';
+    return cpl_render_container('ssm-programs-root', [
+        'screen' => 'shortcode-programs',
+        'category' => $a['category'],
+        'limit' => (int)$a['limit'],
+        'columns' => (int)$a['columns'],
+    ], $fallback);
+};
+add_shortcode('coachpro_programs', CoachPro_LMS::instance()->sc_programs);
+
+// [coachpro_chat program_id="123" allow_uploads="true"]
+CoachPro_LMS::instance()->sc_chat = function($atts){
+    $a = shortcode_atts([
+        'program_id'    => 0,
+        'allow_uploads' => 'true',
+    ], $atts, 'coachpro_chat');
+
+    $fallback = '<p>'.__('Session messages will load here. Start a session to begin.', CoachPro_LMS::TD).'</p>';
+    return cpl_render_container('ssm-chat-root', [
+        'screen' => 'shortcode-chat',
+        'program_id' => absint($a['program_id']),
+        'allow_uploads' => $a['allow_uploads'] === 'true' ? '1' : '0',
+    ], $fallback);
+};
+add_shortcode('coachpro_chat', CoachPro_LMS::instance()->sc_chat);
+
+// [coachpro_dashboard]
+CoachPro_LMS::instance()->sc_dashboard = function($atts){
+    $fallback = '<p>'.__('Your enrolled programs, progress, and recent activity will appear here.', CoachPro_LMS::TD).'</p>';
+    return cpl_render_container('ssm-dashboard-root', [
+        'screen' => 'shortcode-dashboard',
+    ], $fallback);
+};
+add_shortcode('coachpro_dashboard', CoachPro_LMS::instance()->sc_dashboard);
+
+// [coachpro_progress program_id="456" show_charts="true"]
+CoachPro_LMS::instance()->sc_progress = function($atts){
+    $a = shortcode_atts([
+        'program_id' => 0,
+        'show_charts'=> 'true',
+    ], $atts, 'coachpro_progress');
+    $fallback = '<p>'.__('Progress data will appear here.', CoachPro_LMS::TD).'</p>';
+    return cpl_render_container('ssm-progress-root', [
+        'screen' => 'shortcode-progress',
+        'program_id' => absint($a['program_id']),
+        'show_charts'=> $a['show_charts'] === 'true' ? '1' : '0',
+    ], $fallback);
+};
+add_shortcode('coachpro_progress', CoachPro_LMS::instance()->sc_progress);
+
+// [coachpro_coaches specialty="leadership" limit="4"]
+CoachPro_LMS::instance()->sc_coaches = function($atts){
+    $a = shortcode_atts([
+        'specialty' => '',
+        'limit'     => 4,
+    ], $atts, 'coachpro_coaches');
+    $fallback = '<p>'.__('Coaches will be listed here.', CoachPro_LMS::TD).'</p>';
+    return cpl_render_container('ssm-coaches-root', [
+        'screen' => 'shortcode-coaches',
+        'specialty' => $a['specialty'],
+        'limit' => (int)$a['limit'],
+    ], $fallback);
+};
+add_shortcode('coachpro_coaches', CoachPro_LMS::instance()->sc_coaches);
+
+/** Part 3 — AJAX endpoints (secure, non-AI logic) */
+if (!defined('ABSPATH')) exit;
+
+if (!method_exists('CoachPro_LMS', 'ajax_enroll_program')) {
+class CoachPro_LMS_Ajax_Ext {
+    /** Enroll program */
+    public static function enroll() {
+        check_ajax_referer('cpl_ajax', 'nonce');
+        if (!current_user_can('edit_coachpro') && !current_user_can('view_coachpro') && !is_user_logged_in()) {
+            wp_send_json_error(['message' => __('Permission denied.', CoachPro_LMS::TD)], 403);
+        }
+        $student_id = get_current_user_id();
+        $program_id = isset($_POST['program_id']) ? absint($_POST['program_id']) : 0;
+        if (!$student_id || !$program_id) wp_send_json_error(['message' => __('Missing data.', CoachPro_LMS::TD)], 400);
+
+        global $wpdb;
+        $t = CoachPro_LMS::table_names();
+        $exists = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$t['enrollments']} WHERE student_id=%d AND program_id=%d", $student_id, $program_id));
+        $now = current_time('mysql');
+        if ($exists) {
+            $wpdb->update($t['enrollments'], ['status' => 'enrolled', 'updated_at' => $now], ['id' => $exists], ['%s','%s'], ['%d']);
+        } else {
+            $wpdb->insert($t['enrollments'], [
+                'student_id' => $student_id,
+                'program_id' => $program_id,
+                'status'     => 'enrolled',
+                'created_at' => $now,
+                'updated_at' => $now
+            ], ['%d','%d','%s','%s','%s']);
+            // Seed progress row
+            $wpdb->insert($t['progress'], [
+                'student_id' => $student_id,
+                'program_id' => $program_id,
+                'lessons_total' => 0,
+                'lessons_done'  => 0,
+                'avg_score'     => 0.00,
+                'last_active'   => $now,
+                'created_at'    => $now,
+                'updated_at'    => $now
+            ], ['%d','%d','%d','%d','%f','%s','%s','%s']);
+        }
+        wp_send_json_success(['message' => __('Enrolled successfully.', CoachPro_LMS::TD)]);
+    }
+
+    /** Start session (non-AI, opens a thread by inserting a meta record) */
+    public static function start_session() {
+        check_ajax_referer('cpl_ajax', 'nonce');
+        if (!is_user_logged_in()) wp_send_json_error(['message' => __('Login required.', CoachPro_LMS::TD)], 401);
+
+        $student_id = get_current_user_id();
+        $coach_id   = isset($_POST['coach_id']) ? absint($_POST['coach_id']) : 0;
+        $program_id = isset($_POST['program_id']) ? absint($_POST['program_id']) : 0;
+        if (!$program_id) wp_send_json_error(['message' => __('Program required.', CoachPro_LMS::TD)], 400);
+
+        global $wpdb;
+        $t = CoachPro_LMS::table_names();
+        $now = current_time('mysql');
+        // Insert a system message that thread started
+        $wpdb->insert($t['sessions'], [
+            'student_id' => $student_id,
+            'coach_id'   => $coach_id,
+            'program_id' => $program_id,
+            'message'    => wp_kses_post(__('Session started.', CoachPro_LMS::TD)),
+            'attachment_url' => null,
+            'meta_json'  => wp_json_encode(['type' => 'system', 'event' => 'start']),
+            'created_at' => $now
+        ], ['%d','%d','%d','%s','%s','%s','%s']);
+
+        wp_send_json_success(['message' => __('Session opened.', CoachPro_LMS::TD)]);
+    }
+
+    /** Send message (text only; file handling can be added later safely) */
+    public static function send_message() {
+        check_ajax_referer('cpl_ajax', 'nonce');
+        if (!is_user_logged_in()) wp_send_json_error(['message' => __('Login required.', CoachPro_LMS::TD)], 401);
+
+        $student_id = get_current_user_id();
+        $coach_id   = isset($_POST['coach_id']) ? absint($_POST['coach_id']) : 0;
+        $program_id = isset($_POST['program_id']) ? absint($_POST['program_id']) : 0;
+        $message    = isset($_POST['message']) ? wp_kses_post(wp_unslash($_POST['message'])) : '';
+
+        if (!$program_id || $message === '') wp_send_json_error(['message' => __('Invalid message.', CoachPro_LMS::TD)], 400);
+
+        global $wpdb;
+        $t = CoachPro_LMS::table_names();
+        $now = current_time('mysql');
+
+        $wpdb->insert($t['sessions'], [
+            'student_id'    => $student_id,
+            'coach_id'      => $coach_id,
+            'program_id'    => $program_id,
+            'message'       => $message,
+            'attachment_url'=> null,
+            'meta_json'     => wp_json_encode(['type' => 'user']),
+            'created_at'    => $now
+        ], ['%d','%d','%d','%s','%s','%s','%s']);
+
+        // touch progress last_active
+        $wpdb->query($wpdb->prepare("UPDATE {$t['progress']} SET last_active=%s, updated_at=%s WHERE student_id=%d AND program_id=%d",
+            $now, $now, $student_id, $program_id));
+
+        wp_send_json_success(['message' => __('Message sent.', CoachPro_LMS::TD)]);
+    }
+
+    /** Get progress summary */
+    public static function get_progress() {
+        check_ajax_referer('cpl_ajax', 'nonce');
+        if (!is_user_logged_in()) wp_send_json_error(['message' => __('Login required.', CoachPro_LMS::TD)], 401);
+        $student_id = get_current_user_id();
+        $program_id = isset($_POST['program_id']) ? absint($_POST['program_id']) : 0;
+        if (!$program_id) wp_send_json_error(['message' => __('Program required.', CoachPro_LMS::TD)], 400);
+
+        global $wpdb;
+        $t = CoachPro_LMS::table_names();
+        $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t['progress']} WHERE student_id=%d AND program_id=%d", $student_id, $program_id), ARRAY_A);
+        if (!$row) $row = [
+            'lessons_total' => 0, 'lessons_done' => 0, 'avg_score' => 0, 'last_active' => null
+        ];
+        wp_send_json_success(['progress' => $row]);
+    }
+}
+// Bind methods to main class as wrappers
+CoachPro_LMS::instance()->ajax_enroll_program = ['CoachPro_LMS_Ajax_Ext','enroll'];
+CoachPro_LMS::instance()->ajax_start_session  = ['CoachPro_LMS_Ajax_Ext','start_session'];
+CoachPro_LMS::instance()->ajax_send_message   = ['CoachPro_LMS_Ajax_Ext','send_message'];
+CoachPro_LMS::instance()->ajax_get_progress   = ['CoachPro_LMS_Ajax_Ext','get_progress'];
+}
+
+/** Part 4 — REST API endpoints (read/write minimal set) */
+if (!defined('ABSPATH')) exit;
+
+add_action('rest_api_init', function() {
+    $ns = 'coachpro/v1';
+
+    register_rest_route($ns, '/programs', [
+        [
+            'methods'  => WP_REST_Server::READABLE,
+            'callback' => function(WP_REST_Request $req) {
+                $cat = sanitize_text_field($req->get_param('category') ?: '');
+                $args = [
+                    'post_type' => 'cpl_program',
+                    'post_status' => 'publish',
+                    'posts_per_page' => 20
+                ];
+                if ($cat) $args['tax_query'] = [[
+                    'taxonomy' => 'cpl_program_cat',
+                    'field' => 'slug',
+                    'terms' => $cat
+                ]];
+                $q = new WP_Query($args);
+                $items = array_map(function($p){
+                    return [
+                        'id' => $p->ID,
+                        'title' => get_the_title($p),
+                        'excerpt' => wp_strip_all_tags(get_the_excerpt($p)),
+                        'link' => get_permalink($p),
+                        'thumb' => get_the_post_thumbnail_url($p, 'medium'),
+                        'price' => get_post_meta($p->ID, '_cpl_price', true) ?: '0',
+                    ];
+                }, $q->posts);
+                return new WP_REST_Response(['items' => $items], 200);
+            },
+            'permission_callback' => '__return_true'
+        ]
+    ]);
+
+    register_rest_route($ns, '/coaches', [
+        [
+            'methods'  => WP_REST_Server::READABLE,
+            'callback' => function(WP_REST_Request $req) {
+                $spec = sanitize_text_field($req->get_param('specialty') ?: '');
+                $args = [
+                    'post_type' => 'cpl_coach',
+                    'post_status' => 'publish',
+                    'posts_per_page' => 20
+                ];
+                if ($spec) $args['s'] = $spec;
+                $q = new WP_Query($args);
+                $items = array_map(function($p){
+                    return [
+                        'id' => $p->ID,
+                        'title' => get_the_title($p),
+                        'excerpt' => wp_strip_all_tags(get_the_excerpt($p)),
+                        'link' => get_permalink($p),
+                        'thumb' => get_the_post_thumbnail_url($p, 'medium'),
+                    ];
+                }, $q->posts);
+                return new WP_REST_Response(['items' => $items], 200);
+            },
+            'permission_callback' => '__return_true'
+        ]
+    ]);
+
+    register_rest_route($ns, '/sessions', [
+        [
+            'methods'  => WP_REST_Server::READABLE,
+            'callback' => function(WP_REST_Request $req) {
+                if (!is_user_logged_in()) return new WP_Error('forbidden', __('Login required.', CoachPro_LMS::TD), ['status' => 401]);
+                global $wpdb;
+                $t = CoachPro_LMS::table_names();
+                $student_id = get_current_user_id();
+                $program_id = absint($req->get_param('program_id') ?: 0);
+                if (!$program_id) return new WP_Error('bad_request', __('Program required.', CoachPro_LMS::TD), ['status' => 400]);
+
+                $rows = $wpdb->get_results($wpdb->prepare("SELECT id, message, attachment_url, meta_json, created_at FROM {$t['sessions']} WHERE student_id=%d AND program_id=%d ORDER BY id ASC", $student_id, $program_id));
+                $items = [];
+                foreach ($rows as $r) {
+                    $items[] = [
+                        'id' => (int)$r->id,
+                        'message' => wp_kses_post($r->message),
+                        'attachment_url' => esc_url_raw($r->attachment_url),
+                        'meta' => json_decode($r->meta_json ?: '{}', true),
+                        'created_at' => $r->created_at,
+                    ];
+                }
+                return new WP_REST_Response(['items' => $items], 200);
+            },
+            'permission_callback' => '__return_true'
+        ]
+    ]);
+
+    register_rest_route($ns, '/analytics', [
+        [
+            'methods'  => WP_REST_Server::READABLE,
+            'callback' => function(WP_REST_Request $req) {
+                $from = sanitize_text_field($req->get_param('from') ?: '');
+                $to   = sanitize_text_field($req->get_param('to') ?: '');
+                $program_id = absint($req->get_param('program_id') ?: 0);
+                global $wpdb;
+                $t = CoachPro_LMS::table_names();
+                $where = '1=1';
+                $args  = [];
+                if ($program_id) { $where .= " AND program_id=%d"; $args[] = $program_id; }
+                if ($from) { $where .= " AND snapshot_date >= %s"; $args[] = $from; }
+                if ($to) { $where .= " AND snapshot_date <= %s"; $args[] = $to; }
+                $sql = "SELECT snapshot_date, program_id, enrollments, completion_rate, avg_score FROM {$t['analytics']} WHERE {$where} ORDER BY snapshot_date ASC";
+                $rows = $wpdb->get_results($wpdb->prepare($sql, $args));
+                return new WP_REST_Response(['items' => $rows], 200);
+            },
+            'permission_callback' => '__return_true'
+        ]
+    ]);
+});
+
+/** Part 5 — WooCommerce integration (optional auto-enroll) */
+if (!defined('ABSPATH')) exit;
+
+add_action('woocommerce_order_status_completed', function($order_id){
+    if (!get_option('cpl_woo_enable', false)) return;
+    if (!class_exists('WC_Order')) return;
+
+    $order = wc_get_order($order_id);
+    if (!$order) return;
+
+    $user_id = $order->get_user_id();
+    if (!$user_id) return;
+
+    foreach ($order->get_items() as $item) {
+        $product_id = $item->get_product_id();
+        // Map product -> program via meta _cpl_program_id
+        $program_id = absint(get_post_meta($product_id, '_cpl_program_id', true));
+        if ($program_id) {
+            // Mimic AJAX enroll logic but server-side
+            global $wpdb;
+            $t = CoachPro_LMS::table_names();
+            $exists = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$t['enrollments']} WHERE student_id=%d AND program_id=%d", $user_id, $program_id));
+            $now = current_time('mysql');
+            if ($exists) {
+                $wpdb->update($t['enrollments'], ['status'=>'enrolled','updated_at'=>$now], ['id'=>$exists], ['%s','%s'], ['%d']);
+            } else {
+                $wpdb->insert($t['enrollments'], [
+                    'student_id'=>$user_id,'program_id'=>$program_id,'status'=>'enrolled','created_at'=>$now,'updated_at'=>$now
+                ], ['%d','%d','%s','%s','%s']);
+                $wpdb->insert($t['progress'], [
+                    'student_id'=>$user_id,'program_id'=>$program_id,'lessons_total'=>0,'lessons_done'=>0,'avg_score'=>0,'last_active'=>$now,'created_at'=>$now,'updated_at'=>$now
+                ], ['%d','%d','%d','%d','%f','%s','%s','%s']);
+            }
+        }
+    }
+}, 10, 1);
+
+/** Part 6 — Helpers (SEO microdata, settings save via REST, sanitizers) */
+if (!defined('ABSPATH')) exit;
+
+/** Basic program microdata on single program pages */
+add_action('wp_head', function(){
+    if (!is_singular('cpl_program')) return;
+    global $post;
+    $price = get_post_meta($post->ID, '_cpl_price', true) ?: '0';
+    $data = [
+        '@context' => 'https://schema.org',
+        '@type' => 'Course',
+        'name' => get_the_title($post),
+        'description' => wp_strip_all_tags(get_the_excerpt($post)),
+        'provider' => [
+            '@type' => 'Organization',
+            'name' => get_bloginfo('name')
+        ],
+        'offers' => [
+            '@type' => 'Offer',
+            'priceCurrency' => get_option('cpl_currency', 'USD'),
+            'price' => $price,
+            'url' => get_permalink($post),
+            'availability' => 'https://schema.org/InStock'
+        ]
+    ];
+    echo '<script type="application/ld+json">'.wp_json_encode($data).'</script>';
+});
+
+/** REST endpoint to save settings securely (admin only) */
+add_action('rest_api_init', function(){
+    register_rest_route('coachpro/v1', '/settings', [
+        'methods'  => WP_REST_Server::EDITABLE,
+        'callback' => function(WP_REST_Request $req) {
+            if (!current_user_can('manage_coachpro')) return new WP_Error('forbidden', __('Permission denied.', CoachPro_LMS::TD), ['status'=>403]);
+
+            $currency = sanitize_text_field($req->get_param('currency'));
+            $program_page = sanitize_text_field($req->get_param('program_page'));
+            $woo_enable = (bool)$req->get_param('woo_enable');
+            $rules_json = wp_unslash($req->get_param('rules_json'));
+            // Validate JSON
+            json_decode($rules_json);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return new WP_Error('bad_request', __('Invalid rules JSON.', CoachPro_LMS::TD), ['status'=>400]);
+            }
+
+            update_option('cpl_currency', $currency ?: 'USD');
+            update_option('cpl_program_page', $program_page);
+            update_option('cpl_woo_enable', $woo_enable);
+            update_option('cpl_rules_json', $rules_json);
+
+            return new WP_REST_Response(['message' => __('Settings saved.', CoachPro_LMS::TD)], 200);
+        },
+        'permission_callback' => '__return_true'
+    ]);
+});
+
+/** Simple sanitizers for arrays of ints/strings */
+if (!function_exists('cpl_absint_array')) {
+    function cpl_absint_array($arr): array {
+        return array_map('absint', is_array($arr) ? $arr : []);
+    }
+}
+if (!function_exists('cpl_sanitize_text_array')) {
+    function cpl_sanitize_text_array($arr): array {
+        return array_map('sanitize_text_field', is_array($arr) ? $arr : []);
+    }
+}
+
 
 
