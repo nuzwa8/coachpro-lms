@@ -417,7 +417,13 @@ add_action( 'wp_ajax_cpg_get_gpts', 'cpg_ajax_get_gpts' );
  */
 function cpg_ajax_save_gpt() {
     // 1. Security Check
-    check_ajax_referer( 'cpg_admin_nonce', 'nonce' );
+    // We are using JSON input, so $_POST['nonce'] is not set.
+    // We must manually check the nonce from the $_GET parameter (which we added to the URL in JS).
+    if ( ! isset( $_GET['nonce'] ) || ! wp_verify_nonce( sanitize_text_field( $_GET['nonce'] ), 'cpg_admin_nonce' ) ) {
+        wp_send_json_error( [ 'message' => __( 'Nonce verification failed.', CPG_TEXT_DOMAIN ) ], 403 );
+    }
+    
+    // Check capability
     if ( ! current_user_can( 'manage_options' ) ) {
         wp_send_json_error( [ 'message' => __( 'Permission denied.', CPG_TEXT_DOMAIN ) ], 403 );
     }
